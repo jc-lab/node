@@ -315,12 +315,6 @@ void Worker::Run() {
         env_->InitializeInspector(std::move(inspector_parent_handle_));
 #endif
         HandleScope handle_scope(isolate_);
-        InternalCallbackScope callback_scope(
-            env_.get(),
-            Local<Object>(),
-            { 1, 0 },
-            InternalCallbackScope::kAllowEmptyResource |
-                InternalCallbackScope::kSkipAsyncHooks);
 
         if (!env_->RunBootstrapping().IsEmpty()) {
           CreateEnvMessagePort(env_.get());
