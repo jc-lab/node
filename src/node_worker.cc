@@ -303,6 +303,7 @@ void Worker::Run() {
         CreateEnvMessagePort(env_.get());
         Debug(this, "Created message port for worker %llu", thread_id_);
         if (LoadEnvironment(env_.get(),
+                            nullptr,
                             std::move(inspector_parent_handle_))
                 .IsEmpty()) {
           return;
