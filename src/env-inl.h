@@ -64,6 +64,15 @@ inline MultiIsolatePlatform* IsolateData::platform() const {
   return platform_;
 }
 
+inline void IsolateData::set_worker_context(worker::Worker* context) {
+  CHECK_NULL(worker_context_);  // Should be set only once.
+  worker_context_ = context;
+}
+
+inline worker::Worker* IsolateData::worker_context() const {
+  return worker_context_;
+}
+
 inline AsyncHooks::AsyncHooks()
     : async_ids_stack_(env()->isolate(), 16 * 2),
       fields_(env()->isolate(), kFieldsCount),
@@ -830,15 +839,15 @@ inline void Environment::set_has_serialized_options(bool value) {
 }
 
 inline bool Environment::is_main_thread() const {
-  return flags_ & kIsMainThread;
+  return worker_context() == nullptr;
 }
 
 inline bool Environment::owns_process_state() const {
-  return flags_ & kOwnsProcessState;
+  return flags_ & EnvironmentFlags::kOwnsProcessState;
 }
 
 inline bool Environment::owns_inspector() const {
-  return flags_ & kOwnsInspector;
+  return flags_ & EnvironmentFlags::kOwnsInspector;
 }
 
 inline uint64_t Environment::thread_id() const {
@@ -846,12 +855,7 @@ inline uint64_t Environment::thread_id() const {
 }
 
 inline worker::Worker* Environment::worker_context() const {
-  return worker_context_;
-}
-
-inline void Environment::set_worker_context(worker::Worker* context) {
-  CHECK_NULL(worker_context_);  // Should be set only once.
-  worker_context_ = context;
+  return isolate_data()->worker_context();
 }
 
 inline void Environment::add_sub_worker_context(worker::Worker* context) {

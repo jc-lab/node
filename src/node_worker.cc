@@ -8,10 +8,6 @@
 #include "util-inl.h"
 #include "async_wrap-inl.h"
 
-#if HAVE_INSPECTOR
-#include "inspector/worker_inspector.h"  // ParentInspectorHandle
-#endif
-
 #include <memory>
 #include <string>
 #include <vector>
@@ -52,8 +48,7 @@ Worker::Worker(Environment* env,
       per_isolate_opts_(per_isolate_opts),
       exec_argv_(exec_argv),
       platform_(env->isolate_data()->platform()),
-      start_profiler_idle_notifier_(env->profiler_idle_notifier_started()),
-      thread_id_(Environment::AllocateThreadId()),
+      thread_id_(AllocateEnvironmentThreadId()),
       env_vars_(env->env_vars()) {
   Debug(this, "Creating new worker instance with thread id %llu", thread_id_);
 
@@ -73,13 +68,11 @@ Worker::Worker(Environment* env,
 
   object()->Set(env->context(),
                 env->thread_id_string(),
-                Number::New(env->isolate(), static_cast<double>(thread_id_)))
+                Number::New(env->isolate(), static_cast<double>(thread_id_.id)))
       .Check();
 
-#if HAVE_INSPECTOR
-  inspector_parent_handle_ =
-      env->inspector_agent()->GetParentHandle(thread_id_, url);
-#endif
+  inspector_parent_handle_ = GetInspectorParentHandle(
+      env, thread_id_, url.c_str());
 
   argv_ = std::vector<std::string>{env->argv()[0]};
   // Mark this Worker object as weak until we actually start the thread.
@@ -166,6 +159,7 @@ class WorkerThreadData {
       CHECK(isolate_data_);
       if (w_->per_isolate_opts_)
         isolate_data_->set_options(std::move(w_->per_isolate_opts_));
+      isolate_data_->set_worker_context(w_);
     }
 
     Mutex::ScopedLock lock(w_->mutex_);
@@ -227,7 +221,7 @@ size_t Worker::NearHeapLimit(void* data, size_t current_heap_limit,
 
 void Worker::Run() {
   std::string name = "WorkerThread ";
-  name += std::to_string(thread_id_);
+  name += std::to_string(thread_id_.id);
   TRACE_EVENT_METADATA1(
       "__metadata", "thread_name", "name",
       TRACE_STR_COPY(name.c_str()));
@@ -263,20 +257,10 @@ void Worker::Run() {
         Context::Scope context_scope(env_->context());
         if (child_port != nullptr)
           child_port->Close();
-        {
-          Mutex::ScopedLock lock(mutex_);
-          stopped_ = true;
-          this->env_ = nullptr;
-        }
-        env_->thread_stopper()->set_stopped(true);
-        env_->stop_sub_worker_contexts();
-        env_->RunCleanup();
-        RunAtExit(env_.get());
 
-        // This call needs to be made while the `Environment` is still alive
-        // because we assume that it is available for async tracking in the
-        // NodePlatform implementation.
-        platform_->DrainTasks(isolate_);
+        Mutex::ScopedLock lock(mutex_);
+        stopped_ = true;
+        this->env_ = nullptr;
       }
     });
 
@@ -303,20 +287,16 @@ void Worker::Run() {
       CHECK(!context.IsEmpty());
       Context::Scope context_scope(context);
       {
-        // TODO(addaleax): Use CreateEnvironment(), or generally another
-        // public API.
-        env_.reset(new Environment(data.isolate_data_.get(),
-                                   context,
-                                   std::move(argv_),
-                                   std::move(exec_argv_),
-                                   Environment::kNoFlags,
-                                   thread_id_));
+        env_.reset(CreateEnvironment(
+            data.isolate_data_.get(),
+            context,
+            std::move(argv_),
+            std::move(exec_argv_),
+            EnvironmentFlags::kNoFlags,
+            thread_id_));
+        if (is_stopped()) return;
         CHECK_NOT_NULL(env_);
         env_->set_env_vars(std::move(env_vars_));
-        env_->set_abort_on_uncaught_exception(false);
-        env_->set_worker_context(this);
-
-        env_->InitializeLibuv(start_profiler_idle_notifier_);
       }
       {
         Mutex::ScopedLock lock(mutex_);
@@ -326,23 +306,13 @@ void Worker::Run() {
       Debug(this, "Created Environment for worker with id %llu", thread_id_);
       if (is_stopped()) return;
       {
-        env_->InitializeDiagnostics();
-#if HAVE_INSPECTOR
-        env_->InitializeInspector(std::move(inspector_parent_handle_));
-#endif
-        HandleScope handle_scope(isolate_);
-        InternalCallbackScope callback_scope(
-            env_.get(),
-            Local<Object>(),
-            { 1, 0 },
-            InternalCallbackScope::kAllowEmptyResource |
-                InternalCallbackScope::kSkipAsyncHooks);
-
-        if (!env_->RunBootstrapping().IsEmpty()) {
-          CreateEnvMessagePort(env_.get());
-          if (is_stopped()) return;
-          Debug(this, "Created message port for worker %llu", thread_id_);
-          USE(StartExecution(env_.get(), "internal/main/worker_thread"));
+        CreateEnvMessagePort(env_.get());
+        Debug(this, "Created message port for worker %llu", thread_id_);
+        if (LoadEnvironment(env_.get(),
+                            StartExecutionCallback{},
+                            std::move(inspector_parent_handle_))
+                .IsEmpty()) {
+          return;
         }
 
         Debug(this, "Loaded environment for worker %llu", thread_id_);
@@ -653,6 +623,7 @@ namespace {
 void GetEnvMessagePort(const FunctionCallbackInfo<Value>& args) {
   Environment* env = Environment::GetCurrent(args);
   Local<Object> port = env->message_port();
+  CHECK_IMPLIES(!env->is_main_thread(), !port.IsEmpty());
   if (!port.IsEmpty()) {
     CHECK_EQ(port->CreationContext()->GetIsolate(), args.GetIsolate());
     args.GetReturnValue().Set(port);

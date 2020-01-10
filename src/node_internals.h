@@ -294,6 +294,10 @@ v8::Isolate* NewIsolate(v8::Isolate::CreateParams* params,
                         MultiIsolatePlatform* platform);
 v8::MaybeLocal<v8::Value> StartExecution(Environment* env,
                                          const char* main_script_id);
+// This overload automatically picks the right 'main_script_id' if no callback
+// was provided by the embedder.
+v8::MaybeLocal<v8::Value> StartExecution(Environment* env,
+                                         StartExecutionCallback cb = nullptr);
 v8::MaybeLocal<v8::Object> GetPerContextExports(v8::Local<v8::Context> context);
 v8::MaybeLocal<v8::Value> ExecuteBootstrapper(
     Environment* env,

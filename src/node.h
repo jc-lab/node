@@ -65,6 +65,7 @@
 #include "node_version.h"  // NODE_MODULE_VERSION
 
 #include <memory>
+#include <functional>
 
 // We cannot use __POSIX__ in this header because that's only defined when
 // building Node.js.
@@ -376,18 +377,88 @@ NODE_EXTERN IsolateData* CreateIsolateData(
     ArrayBufferAllocator* allocator = nullptr);
 NODE_EXTERN void FreeIsolateData(IsolateData* isolate_data);
 
-// TODO(addaleax): Add an official variant using STL containers, and move
-// per-Environment options parsing here.
+struct ThreadId {
+  uint64_t id = static_cast<uint64_t>(-1);
+};
+NODE_EXTERN ThreadId AllocateEnvironmentThreadId();
+
+namespace EnvironmentFlags {
+enum Flags : uint64_t {
+  kNoFlags = 0,
+  // Use the default behaviour for Node.js instances.
+  kDefaultFlags = 1 << 0,
+  // Controls whether this Environment is allowed to affect per-process state
+  // (e.g. cwd, process title, uid, etc.).
+  // This is set when using kDefaultFlags.
+  kOwnsProcessState = 1 << 1,
+  // Set if this Environment instance is associated with the global inspector
+  // handling code (i.e. listening on SIGUSR1).
+  // This is set when using kDefaultFlags.
+  kOwnsInspector = 1 << 2,
+  // Set up a standard Node.js Environment, including starting any libuv handles
+  // and the inspector, as well as anything dependent on e.g. environment
+  // variables or command line flags.
+  // This conflicts with LoadEnvironment().
+  // It is recommended to not set or rely on this flag, and it will be removed.
+  kPrepareForExecution = 1 << 3
+};
+}  // namespace EnvironmentFlags
+
+// TODO(addaleax): Maybe move per-Environment options parsing here.
 // Returns nullptr when the Environment cannot be created e.g. there are
 // pending JavaScript exceptions.
+// It is recommended to use the second variant taking a flags argument.
+// kPrepareForExecution is used by default for backwards compatibility,
+// but will be removed and LoadEnvironment() should be used instead.
 NODE_EXTERN Environment* CreateEnvironment(IsolateData* isolate_data,
                                            v8::Local<v8::Context> context,
                                            int argc,
                                            const char* const* argv,
                                            int exec_argc,
                                            const char* const* exec_argv);
+NODE_EXTERN Environment* CreateEnvironment(
+    IsolateData* isolate_data,
+    v8::Local<v8::Context> context,
+    const std::vector<std::string>& args,
+    const std::vector<std::string>& exec_args,
+    EnvironmentFlags::Flags flags = static_cast<EnvironmentFlags::Flags>(
+        EnvironmentFlags::kDefaultFlags |
+        EnvironmentFlags::kPrepareForExecution),
+    ThreadId thread_id = {} /* allocates a thread id automatically */);
 
+struct InspectorParentHandle {
+  virtual ~InspectorParentHandle();
+};
+// Returns a handle that can be passed to `LoadEnvironment()`, making the
+// child Environment accessible to the inspector as if it were a Node.js Worker.
+// `child_thread_id` can be created using `AllocateEnvironmentThreadId()`
+// and then later passed on to `CreateEnvironment()` to create the child
+// Environment.
+// This method should not be called while the parent Environment is active
+// on another thread.
+NODE_EXTERN std::unique_ptr<InspectorParentHandle> GetInspectorParentHandle(
+    Environment* parent_env,
+    ThreadId child_thread_id,
+    const char* child_url);
+
+struct StartExecutionCallbackInfo {
+  v8::Local<v8::Object> process_object;
+  v8::Local<v8::Function> native_require;
+};
+
+using StartExecutionCallback =
+    std::function<v8::MaybeLocal<v8::Value>(const StartExecutionCallbackInfo&)>;
+
+// TODO(addaleax): Deprecate this in favour of the MaybeLocal<> overload.
 NODE_EXTERN void LoadEnvironment(Environment* env);
+NODE_EXTERN v8::MaybeLocal<v8::Value> LoadEnvironment(
+    Environment* env,
+    StartExecutionCallback cb,
+    std::unique_ptr<InspectorParentHandle> inspector_parent_handle = {});
+NODE_EXTERN v8::MaybeLocal<v8::Value> LoadEnvironment(
+    Environment* env,
+    const char* main_script_source_utf8,
+    std::unique_ptr<InspectorParentHandle> inspector_parent_handle = {});
 NODE_EXTERN void FreeEnvironment(Environment* env);
 
 // This may return nullptr if context is not associated with a Node instance.

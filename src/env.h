@@ -486,6 +486,9 @@ class IsolateData : public MemoryRetainer {
   inline v8::ArrayBuffer::Allocator* allocator() const;
   inline NodeArrayBufferAllocator* node_allocator() const;
 
+  inline worker::Worker* worker_context() const;
+  inline void set_worker_context(worker::Worker* context);
+
 #define VP(PropertyName, StringValue) V(v8::Private, PropertyName)
 #define VY(PropertyName, StringValue) V(v8::Symbol, PropertyName)
 #define VS(PropertyName, StringValue) V(v8::String, PropertyName)
@@ -530,6 +533,7 @@ class IsolateData : public MemoryRetainer {
   const bool uses_node_allocator_;
   MultiIsolatePlatform* platform_;
   std::shared_ptr<PerIsolateOptions> options_;
+  worker::Worker* worker_context_ = nullptr;
 };
 
 struct ContextInfo {
@@ -880,13 +884,6 @@ class Environment : public MemoryRetainer {
   inline void PushAsyncCallbackScope();
   inline void PopAsyncCallbackScope();
 
-  enum Flags {
-    kNoFlags = 0,
-    kIsMainThread = 1 << 0,
-    kOwnsProcessState = 1 << 1,
-    kOwnsInspector = 1 << 2,
-  };
-
   static inline Environment* GetCurrent(v8::Isolate* isolate);
   static inline Environment* GetCurrent(v8::Local<v8::Context> context);
   static inline Environment* GetCurrent(
@@ -905,8 +902,8 @@ class Environment : public MemoryRetainer {
               v8::Local<v8::Context> context,
               const std::vector<std::string>& args,
               const std::vector<std::string>& exec_args,
-              Flags flags = Flags(),
-              uint64_t thread_id = kNoThreadId);
+              EnvironmentFlags::Flags flags,
+              ThreadId thread_id);
   ~Environment();
 
   void InitializeLibuv(bool start_profiler_idle_notifier);
@@ -1072,16 +1069,12 @@ class Environment : public MemoryRetainer {
   inline bool has_serialized_options() const;
   inline void set_has_serialized_options(bool has_serialized_options);
 
-  static uint64_t AllocateThreadId();
-  static constexpr uint64_t kNoThreadId = -1;
-
   inline bool is_main_thread() const;
   inline bool owns_process_state() const;
   inline bool owns_inspector() const;
   inline uint64_t thread_id() const;
   inline worker::Worker* worker_context() const;
   Environment* worker_parent_env() const;
-  inline void set_worker_context(worker::Worker* context);
   inline void add_sub_worker_context(worker::Worker* context);
   inline void remove_sub_worker_context(worker::Worker* context);
   void stop_sub_worker_contexts();
@@ -1344,7 +1337,7 @@ class Environment : public MemoryRetainer {
   bool has_serialized_options_ = false;
 
   bool can_call_into_js_ = true;
-  Flags flags_;
+  uint64_t flags_;
   uint64_t thread_id_;
   std::unordered_set<worker::Worker*> sub_worker_contexts_;
 
@@ -1386,8 +1379,6 @@ class Environment : public MemoryRetainer {
 
   std::vector<std::unique_ptr<fs::FileHandleReadWrap>>
       file_handle_read_wrap_freelist_;
-
-  worker::Worker* worker_context_ = nullptr;
 
   std::list<node_module> extra_linked_bindings_;
   Mutex extra_linked_bindings_mutex_;

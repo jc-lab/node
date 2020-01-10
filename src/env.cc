@@ -231,12 +231,6 @@ void TrackingTraceStateObserver::UpdateTraceCategoryState() {
       .ToLocalChecked();
 }
 
-static std::atomic<uint64_t> next_thread_id{0};
-
-uint64_t Environment::AllocateThreadId() {
-  return next_thread_id++;
-}
-
 void Environment::CreateProperties() {
   HandleScope handle_scope(isolate_);
   Local<Context> ctx = context();
@@ -293,8 +287,8 @@ Environment::Environment(IsolateData* isolate_data,
                          Local<Context> context,
                          const std::vector<std::string>& args,
                          const std::vector<std::string>& exec_args,
-                         Flags flags,
-                         uint64_t thread_id)
+                         EnvironmentFlags::Flags flags,
+                         ThreadId thread_id)
     : isolate_(context->GetIsolate()),
       isolate_data_(isolate_data),
       immediate_info_(context->GetIsolate()),
@@ -306,13 +300,22 @@ Environment::Environment(IsolateData* isolate_data,
       should_abort_on_uncaught_toggle_(isolate_, 1),
       stream_base_state_(isolate_, StreamBase::kNumStreamBaseStateFields),
       flags_(flags),
-      thread_id_(thread_id == kNoThreadId ? AllocateThreadId() : thread_id),
+      thread_id_(thread_id.id == static_cast<uint64_t>(-1) ?
+          AllocateEnvironmentThreadId().id : thread_id.id),
       fs_stats_field_array_(isolate_, kFsStatsBufferLength),
       fs_stats_field_bigint_array_(isolate_, kFsStatsBufferLength),
       context_(context->GetIsolate(), context) {
   // We'll be creating new objects so make sure we've entered the context.
   HandleScope handle_scope(isolate());
   Context::Scope context_scope(context);
+
+  // Set some flags if only kDefaultFlags was passed. This can make API version
+  // transitions easier for embedders.
+  if (flags_ & EnvironmentFlags::kDefaultFlags) {
+    flags_ = flags_ |
+        EnvironmentFlags::kOwnsProcessState |
+        EnvironmentFlags::kOwnsInspector;
+  }
 
   set_env_vars(per_process::system_environment);
 
@@ -329,6 +332,10 @@ Environment::Environment(IsolateData* isolate_data,
 #endif
 
   AssignToContext(context, ContextInfo(""));
+
+  static uv_once_t init_once = UV_ONCE_INIT;
+  uv_once(&init_once, InitThreadLocalOnce);
+  uv_key_set(&thread_local_env, this);
 
   if (tracing::AgentWriterHandle* writer = GetTracingAgentWriter()) {
     trace_state_observer_ = std::make_unique<TrackingTraceStateObserver>(this);
@@ -385,9 +392,17 @@ Environment::Environment(IsolateData* isolate_data,
   // TODO(joyeecheung): deserialize when the snapshot covers the environment
   // properties.
   CreateProperties();
+
+  // This needs to be set to false before the thread stopper is actually set up,
+  // because is_stopping() should be false during bootstrapper execution but
+  // the thread stopper only starts during libuv setup.
+  thread_stopper()->set_stopped(false);
 }
 
 Environment::~Environment() {
+  // FreeEnvironment() should have set this.
+  CHECK(is_stopping());
+
   isolate()->GetHeapProfiler()->RemoveBuildEmbedderGraphCallback(
       BuildEmbedderGraph, this);
 
@@ -475,7 +490,6 @@ void Environment::InitializeLibuv(bool start_profiler_idle_notifier) {
       Environment* env = static_cast<Environment*>(handle->data);
       uv_stop(env->event_loop());
     });
-  thread_stopper()->set_stopped(false);
   uv_unref(reinterpret_cast<uv_handle_t*>(thread_stopper()->GetHandle()));
 
   // Register clean-up cb to be called to clean up the handles
@@ -487,10 +501,6 @@ void Environment::InitializeLibuv(bool start_profiler_idle_notifier) {
   if (start_profiler_idle_notifier) {
     StartProfilerIdleNotifier();
   }
-
-  static uv_once_t init_once = UV_ONCE_INIT;
-  uv_once(&init_once, InitThreadLocalOnce);
-  uv_key_set(&thread_local_env, this);
 }
 
 void Environment::ExitEnv() {
@@ -958,7 +968,7 @@ void Environment::Exit(int exit_code) {
     DisposePlatform();
     exit(exit_code);
   } else {
-    worker_context_->Exit(exit_code);
+    worker_context()->Exit(exit_code);
   }
 }
 
@@ -972,8 +982,8 @@ void Environment::stop_sub_worker_contexts() {
 }
 
 Environment* Environment::worker_parent_env() const {
-  if (worker_context_ == nullptr) return nullptr;
-  return worker_context_->env();
+  if (worker_context() == nullptr) return nullptr;
+  return worker_context()->env();
 }
 
 void MemoryTracker::TrackField(const char* edge_name,
