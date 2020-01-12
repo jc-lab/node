@@ -482,7 +482,13 @@ std::shared_ptr<PerIsolatePlatformData>
 NodePlatform::ForNodeIsolate(Isolate* isolate) {
   Mutex::ScopedLock lock(per_isolate_mutex_);
   auto data = per_isolate_[isolate];
-  CHECK(data.second);
+  if (!data.second) {
+    CHECK(data.first);
+    std::shared_ptr<v8::TaskRunner> task_runner = data.first->GetForegroundTaskRunner();
+    std::shared_ptr<PerIsolatePlatformData> platform_data = std::dynamic_pointer_cast<PerIsolatePlatformData>(task_runner);
+    CHECK(platform_data.get());
+    return platform_data;
+  }
   return data.second;
 }
 
