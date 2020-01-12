@@ -252,6 +252,8 @@ TEST_F(EnvironmentTest, SetImmediateCleanup) {
     const Argv argv;
     Env env {handle_scope, argv};
 
+    (*env)->InitializeLibuv(false);
+
     (*env)->SetImmediate([&](node::Environment* env_arg) {
       EXPECT_EQ(env_arg, *env);
       called++;
